@@ -69,6 +69,8 @@
 #define JPEG_SCALE_HALF 2
 #define JPEG_SCALE_QUARTER 4
 #define JPEG_SCALE_EIGHTH 8
+// decodeRows() return value when MCU rows remain to be decoded
+#define JPEG_DECODE_MORE 2
 #define JPEG_LE_PIXELS 16
 #define JPEG_EXIF_THUMBNAIL 32
 #define JPEG_LUMA_ONLY 64
@@ -217,6 +219,11 @@ typedef struct jpeg_image_tag
     int iVLCSize; // current quantity of data in the VLC buffer
     int iResInterval, iResCount; // restart interval
     int iMaxMCUs; // max MCUs of pixels per JPEGDraw call
+    int iDecodeRow; // next MCU row for decodeRows()
+    int iDCPred0, iDCPred1, iDCPred2; // DC predictors carried between decodeRows() calls
+    int iDMAOffset; // ping-pong buffer offset carried between decodeRows() calls
+    uint16_t *pAlignedPixels; // usPixels as it was when the decode started
+    int bDecodeActive; // decodeBegin() succeeded and the image is not finished
     JPEG_READ_CALLBACK *pfnRead;
     JPEG_SEEK_CALLBACK *pfnSeek;
     JPEG_DRAW_CALLBACK *pfnDraw;
@@ -265,6 +272,9 @@ class JPEGDEC
 #endif
     void close();
     int decode(int x, int y, int iOptions);
+    // Decode in steps: decodeBegin() once, then decodeRows() until it stops returning JPEG_DECODE_MORE
+    int decodeBegin(int x, int y, int iOptions);
+    int decodeRows(int iRows);
     int decodeDither(uint8_t *pDither, int iOptions);
     int decodeDither(int x, int y, uint8_t *pDither, int iOptions);
     int getOrientation();
@@ -295,6 +305,8 @@ int JPEG_openFile(JPEGIMAGE *pJPEG, const char *szFilename, JPEG_DRAW_CALLBACK *
 int JPEG_getWidth(JPEGIMAGE *pJPEG);
 int JPEG_getHeight(JPEGIMAGE *pJPEG);
 int JPEG_decode(JPEGIMAGE *pJPEG, int x, int y, int iOptions);
+int JPEG_decodeBegin(JPEGIMAGE *pJPEG, int x, int y, int iOptions);
+int JPEG_decodeRows(JPEGIMAGE *pJPEG, int iRows);
 int JPEG_decodeDither(JPEGIMAGE *pJPEG, uint8_t *pDither, int iOptions);
 void JPEG_close(JPEGIMAGE *pJPEG);
 int JPEG_getLastError(JPEGIMAGE *pJPEG);

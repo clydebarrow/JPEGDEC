@@ -248,6 +248,19 @@ int JPEGDEC::decode(int x, int y, int iOptions)
     _jpeg.iOptions = iOptions;
     return DecodeJPEG(&_jpeg);
 } /* decode() */
+
+int JPEGDEC::decodeBegin(int x, int y, int iOptions)
+{
+    _jpeg.iXOffset = x;
+    _jpeg.iYOffset = y;
+    _jpeg.iOptions = iOptions;
+    return JPEGDecodeStart(&_jpeg);
+} /* decodeBegin() */
+
+int JPEGDEC::decodeRows(int iRows)
+{
+    return JPEGDecodeRows(&_jpeg, iRows);
+} /* decodeRows() */
 //
 // set draw callback user pointer variable
 //

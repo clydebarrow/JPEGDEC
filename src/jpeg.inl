@@ -64,6 +64,8 @@ static int JPEGInit(JPEGIMAGE *pJPEG);
 static int JPEGParseInfo(JPEGIMAGE *pPage, int bExtractThumb);
 static void JPEGGetMoreData(JPEGIMAGE *pPage);
 static int DecodeJPEG(JPEGIMAGE *pImage);
+static int JPEGDecodeStart(JPEGIMAGE *pJPEG);
+static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows);
 static int32_t readRAM(JPEGFILE *pFile, uint8_t *pBuf, int32_t iLen);
 static int32_t seekMem(JPEGFILE *pFile, int32_t iPosition);
 #if defined (__MACH__) || defined( __LINUX__ ) || defined( __MCUXPRESSO ) || defined(_WIN64)
@@ -659,6 +661,19 @@ int JPEG_decode(JPEGIMAGE *pJPEG, int x, int y, int iOptions)
     pJPEG->iOptions = iOptions;
     return DecodeJPEG(pJPEG);
 } /* JPEG_decode() */
+
+int JPEG_decodeBegin(JPEGIMAGE *pJPEG, int x, int y, int iOptions)
+{
+    pJPEG->iXOffset = x;
+    pJPEG->iYOffset = y;
+    pJPEG->iOptions = iOptions;
+    return JPEGDecodeStart(pJPEG);
+} /* JPEG_decodeBegin() */
+
+int JPEG_decodeRows(JPEGIMAGE *pJPEG, int iRows)
+{
+    return JPEGDecodeRows(pJPEG, iRows);
+} /* JPEG_decodeRows() */
 
 int JPEG_decodeDither(JPEGIMAGE *pJPEG, uint8_t *pDither, int iOptions)
 {
@@ -4940,23 +4955,22 @@ uint8_t pixelmask=0, shift=0;
 // Decode the image
 // returns 0 for error, 1 for success
 //
+//
+// Decode the whole image in one call
+//
 static int DecodeJPEG(JPEGIMAGE *pJPEG)
 {
-    int cx, cy, x, y, mcuCX, mcuCY;
-    int iLum0, iLum1, iLum2, iLum3, iCr, iCb;
-    signed int iDCPred0, iDCPred1, iDCPred2;
-    int i, iQuant1, iQuant2, iQuant3, iErr;
-    int iSkipMask, bSkipRow;
-    int iDMASize, iDMAOffset;
-    uint16_t *pAlignedPixels = pJPEG->usPixels;
-    uint8_t c;
-    int iMCUCount, xoff, iPitch, bThumbnail = 0;
-    int bContinue = 1; // early exit if the DRAW callback wants to stop
-    uint32_t l, *pl;
-    unsigned char cDCTable0, cACTable0, cDCTable1, cACTable1, cDCTable2, cACTable2;
-    JPEGDRAW jd;
-    int iMaxFill = 16, iScaleShift = 0;
-
+    if (!JPEGDecodeStart(pJPEG))
+        return 0;
+    return JPEGDecodeRows(pJPEG, 0x7fffffff);
+} /* DecodeJPEG() */
+//
+// Prepare to decode the image a few MCU rows at a time with JPEGDecodeRows().
+// This does the work that must only happen once per decode.
+//
+static int JPEGDecodeStart(JPEGIMAGE *pJPEG)
+{
+    pJPEG->bDecodeActive = 0;
     // Requested the Exif thumbnail
     if (pJPEG->ucMode == 0xc2) { // progressive mode - we only decode the first scan (DC values)
         pJPEG->iOptions |= JPEG_SCALE_EIGHTH; // return 1/8 sized image
@@ -4971,6 +4985,51 @@ static int DecodeJPEG(JPEGIMAGE *pJPEG)
         if (!JPEGParseInfo(pJPEG, 1)) // parse the embedded thumbnail file header
             return 0; // something went wrong
     }
+    if (pJPEG->iOptions & JPEG_LUMA_ONLY && pJPEG->ucPixelType < EIGHT_BIT_GRAYSCALE) {
+        pJPEG->ucPixelType = EIGHT_BIT_GRAYSCALE; // switch to grayscale output
+    }
+    // reorder and fix the quantization table for decoding
+    JPEGFixQuantD(pJPEG);
+    pJPEG->bb.ulBits = MOTOLONG(&pJPEG->ucFileBuf[0]); // preload first 4/8 bytes
+    pJPEG->bb.pBuf = pJPEG->ucFileBuf;
+    pJPEG->bb.ulBitOff = 0;
+    pJPEG->iResCount = pJPEG->iResInterval;
+    // State carried from one JPEGDecodeRows() call to the next
+    pJPEG->iDecodeRow = 0;
+    pJPEG->iDCPred0 = pJPEG->iDCPred1 = pJPEG->iDCPred2 = 0;
+    pJPEG->iDMAOffset = 0;
+    pJPEG->pAlignedPixels = pJPEG->usPixels;
+    pJPEG->bDecodeActive = 1;
+    return 1;
+} /* JPEGDecodeStart() */
+//
+// Decode up to iRows more rows of MCUs, continuing where the last call stopped.
+// Returns JPEG_DECODE_MORE when rows remain, 1 when the image is finished (or
+// the draw callback asked to stop) and 0 on error.
+//
+static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows)
+{
+    int cx, cy, x, y, yEnd, mcuCX, mcuCY;
+    int iLum0, iLum1, iLum2, iLum3, iCr, iCb;
+    signed int iDCPred0, iDCPred1, iDCPred2;
+    int i, iQuant1, iQuant2, iQuant3, iErr;
+    int iSkipMask, bSkipRow;
+    int iDMASize, iDMAOffset;
+    uint16_t *pAlignedPixels;
+    uint8_t c;
+    int iMCUCount, xoff, iPitch, bThumbnail = 0;
+    int bContinue = 1; // early exit if the DRAW callback wants to stop
+    uint32_t l, *pl;
+    unsigned char cDCTable0, cACTable0, cDCTable1, cACTable1, cDCTable2, cACTable2;
+    JPEGDRAW jd;
+    int iMaxFill = 16, iScaleShift = 0;
+
+    if (!pJPEG->bDecodeActive || iRows < 1)
+    {
+        pJPEG->iError = JPEG_INVALID_PARAMETER;
+        return 0;
+    }
+    pAlignedPixels = pJPEG->pAlignedPixels;
     // Fast downscaling options
     if (pJPEG->iOptions & JPEG_SCALE_HALF)
         iScaleShift = 1;
@@ -4985,22 +5044,17 @@ static int DecodeJPEG(JPEGIMAGE *pJPEG)
         iMaxFill = 1;
         bThumbnail = 1;
     }
-    if (pJPEG->iOptions & JPEG_LUMA_ONLY && pJPEG->ucPixelType < EIGHT_BIT_GRAYSCALE) {
-        pJPEG->ucPixelType = EIGHT_BIT_GRAYSCALE; // switch to grayscale output
-    }
-    // reorder and fix the quantization table for decoding
-    JPEGFixQuantD(pJPEG);
-    pJPEG->bb.ulBits = MOTOLONG(&pJPEG->ucFileBuf[0]); // preload first 4/8 bytes
-    pJPEG->bb.pBuf = pJPEG->ucFileBuf;
-    pJPEG->bb.ulBitOff = 0;
-    
+
     cDCTable0 = pJPEG->JPCI[0].dc_tbl_no;
     cACTable0 = pJPEG->JPCI[0].ac_tbl_no;
     cDCTable1 = pJPEG->JPCI[1].dc_tbl_no;
     cACTable1 = pJPEG->JPCI[1].ac_tbl_no;
     cDCTable2 = pJPEG->JPCI[2].dc_tbl_no;
     cACTable2 = pJPEG->JPCI[2].ac_tbl_no;
-    iDCPred0 = iDCPred1 = iDCPred2 = mcuCX = mcuCY = 0;
+    iDCPred0 = pJPEG->iDCPred0;
+    iDCPred1 = pJPEG->iDCPred1;
+    iDCPred2 = pJPEG->iDCPred2;
+    mcuCX = mcuCY = 0;
     
     switch (pJPEG->ucSubSample) // set up the parameters for the different subsampling options
     {
@@ -5054,13 +5108,13 @@ static int DecodeJPEG(JPEGIMAGE *pJPEG)
     iLum2 = MCU2;
     iLum3 = MCU3;
     iErr = 0;
-    pJPEG->iResCount = pJPEG->iResInterval;
     // Calculate how many MCUs we can fit in the pixel buffer to maximize LCD drawing speed
     iMCUCount = MAX_BUFFERED_PIXELS / (mcuCX * mcuCY);
     if (pJPEG->ucPixelType == RGB8888) {
         iMCUCount /= 2; // half as many will fit
     }
-    iDMASize = iDMAOffset = 0; // assume no DMA scheme
+    iDMASize = 0; // assume no DMA scheme
+    iDMAOffset = pJPEG->iDMAOffset;
     if (pJPEG->ucPixelType == EIGHT_BIT_GRAYSCALE)
         iMCUCount *= 2; // each pixel is only 1 byte
     if (iMCUCount > cx)
@@ -5103,7 +5157,9 @@ static int DecodeJPEG(JPEGIMAGE *pJPEG)
     else
         jd.pPixels = pJPEG->usPixels;
     jd.iHeight = mcuCY;
-    for (y = 0; y < cy && bContinue && iErr == 0; y++)
+    y = pJPEG->iDecodeRow;
+    yEnd = (iRows < cy - y) ? y + iRows : cy;
+    for (; y < yEnd && bContinue && iErr == 0; y++)
     {
         bSkipRow = (y*mcuCY < pJPEG->iCropY);
         jd.x = pJPEG->iXOffset;
@@ -5348,7 +5404,19 @@ static int DecodeJPEG(JPEGIMAGE *pJPEG)
                 JPEGGetMoreData(pJPEG); // need more 'filtered' VLC data
         } // for x
     } // for y
+    pJPEG->iDecodeRow = y;
+    pJPEG->iDCPred0 = iDCPred0;
+    pJPEG->iDCPred1 = iDCPred1;
+    pJPEG->iDCPred2 = iDCPred2;
+    pJPEG->iDMAOffset = iDMAOffset;
     if (iErr != 0)
+    {
         pJPEG->iError = JPEG_DECODE_ERROR;
-    return (iErr == 0);
-} /* DecodeJPEG() */
+        pJPEG->bDecodeActive = 0;
+        return 0;
+    }
+    if (y < cy && bContinue)
+        return JPEG_DECODE_MORE;
+    pJPEG->bDecodeActive = 0;
+    return 1;
+} /* JPEGDecodeRows() */
