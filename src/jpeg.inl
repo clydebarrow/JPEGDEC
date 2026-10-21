@@ -733,10 +733,13 @@ void JPEG_setCropArea(JPEGIMAGE *pJPEG, int x, int y, int w, int h)
     }
     if (x > pJPEG->iWidth-mcuCX) x = pJPEG->iWidth-mcuCX;
     if (y > pJPEG->iHeight-mcuCY) y = pJPEG->iHeight-mcuCY;
-    if (x + w > pJPEG->iWidth) w = pJPEG->iWidth - mcuCX;
-    if (y + h > pJPEG->iHeight) h = pJPEG->iHeight - mcuCY;
+    if (x < 0) x = 0; // an image narrower or shorter than one MCU
+    if (y < 0) y = 0;
     x &= ~(mcuCX-1);
     y &= ~(mcuCY-1);
+    // A crop that runs off the image keeps the rest of it; a partial MCU at the edge is clipped when drawn
+    if (x + w > pJPEG->iWidth) w = pJPEG->iWidth - x;
+    if (y + h > pJPEG->iHeight) h = pJPEG->iHeight - y;
     pJPEG->iCropX = x; pJPEG->iCropY = y;
     pJPEG->iCropCX = w; pJPEG->iCropCY = h;
 } /* JPEG_setCropArea() */
@@ -5061,6 +5064,7 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows, int bCanPause)
     unsigned char cDCTable0, cACTable0, cDCTable1, cACTable1, cDCTable2, cACTable2;
     JPEGDRAW jd;
     int iMaxFill = 16, iScaleShift = 0;
+    int iCropX, iCropY, iCropCX; // the crop area at the output scale
 
     if (!pJPEG->bDecodeActive || iRows < 1)
     {
@@ -5136,6 +5140,11 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows, int bCanPause)
     // Scale down the MCUs by the requested amount
     mcuCX >>= iScaleShift;
     mcuCY >>= iScaleShift;
+    // The crop is set in source pixels and starts on an MCU, so its corner scales exactly; its width is only a
+    // whole number of MCUs when it ends inside the image, so round that up to cover a partial MCU at the edge
+    iCropX = pJPEG->iCropX >> iScaleShift;
+    iCropY = pJPEG->iCropY >> iScaleShift;
+    iCropCX = (pJPEG->iCropCX + (1 << iScaleShift) - 1) >> iScaleShift;
     
     iQuant1 = pJPEG->sQuantTable[pJPEG->JPCI[0].quant_tbl_no*DCTSIZE]; // DC quant values
     iQuant2 = pJPEG->sQuantTable[pJPEG->JPCI[1].quant_tbl_no*DCTSIZE];
@@ -5167,8 +5176,8 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows, int bCanPause)
         iMCUCount = cx; // do the whole row
     }
     if (pJPEG->iCropCX != pJPEG->iWidth /*(cx * mcuCX)*/) { // crop enabled
-        if (iMCUCount * mcuCX > pJPEG->iCropCX) {
-            iMCUCount = (pJPEG->iCropCX / mcuCX); // maximum width is the crop width
+        if (iMCUCount * mcuCX > iCropCX) {
+            iMCUCount = (iCropCX / mcuCX); // maximum width is the crop width
         }
     }
     jd.iBpp = 16;
@@ -5200,12 +5209,12 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows, int bCanPause)
     iStartCol = pJPEG->iDecodeCol; // non-zero when resuming part way through a row
     for (; y < yEnd && bContinue && iErr == 0; y++)
     {
-        bSkipRow = (y*mcuCY < pJPEG->iCropY);
+        bSkipRow = (y*mcuCY < iCropY);
         jd.x = pJPEG->iXOffset;
         xoff = 0; // start of new LCD output group
         if (pJPEG->pFramebuffer) { // user-supplied buffer is full width
-            int ty = (y * mcuCY) - pJPEG->iCropY;
-            iPitch = pJPEG->iCropCX; // size of cropped width
+            int ty = (y * mcuCY) - iCropY;
+            iPitch = iCropCX; // size of cropped width
             pJPEG->usPixels = (uint16_t *)pJPEG->pFramebuffer;
             if (pJPEG->ucPixelType >= EIGHT_BIT_GRAYSCALE) {
                 pJPEG->usPixels += (ty * iPitch/2); // 1 byte per pixel
@@ -5241,7 +5250,10 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows, int bCanPause)
             }
 
             iSkipMask = 0; // assume not skipping
-            if (bSkipRow || x*mcuCX < pJPEG->iCropX || x*mcuCX > pJPEG->iCropX+pJPEG->iCropCX) {
+            // The MCU just past the crop completes the last output group; a framebuffer has no groups, and the
+            // scaled MCU writers do not clip it to the row, so leave it out there
+            if (bSkipRow || x*mcuCX < iCropX || x*mcuCX > iCropX+iCropCX ||
+                (pJPEG->pFramebuffer && x*mcuCX >= iCropX+iCropCX)) {
                 iSkipMask = MCU_SKIP;
             }
             pJPEG->ucACTable = cACTable0;
@@ -5411,8 +5423,14 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows, int bCanPause)
                 int iAdjust;
                 int iCurW, iCurH;
                 iAdjust = (1<<iScaleShift)-1;
-                iCurW = (pJPEG->iWidth + iAdjust) >> iScaleShift;
-                iCurH = (pJPEG->iHeight + iAdjust) >> iScaleShift;
+                // The size of the output: the crop (the whole image by default) at the output scale, ending at
+                // the edge of the image. Output positions count from the crop's corner.
+                iCurW = pJPEG->iCropX + pJPEG->iCropCX;
+                if (iCurW > pJPEG->iWidth) iCurW = pJPEG->iWidth;
+                iCurW = ((iCurW + iAdjust) >> iScaleShift) - iCropX;
+                iCurH = pJPEG->iCropY + pJPEG->iCropCY;
+                if (iCurH > pJPEG->iHeight) iCurH = pJPEG->iHeight;
+                iCurH = ((iCurH + iAdjust) >> iScaleShift) - iCropY;
                 jd.iWidth = jd.iWidthUsed = iPitch; // width of each LCD block group
                 jd.pUser = pJPEG->pUser;
                 if (pJPEG->ucPixelType > EIGHT_BIT_GRAYSCALE) { // dither to 4/2/1 bits
@@ -5420,10 +5438,10 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows, int bCanPause)
                 }
                 if (((jd.x - pJPEG->iXOffset) + iPitch) > iCurW) { // right edge has clipped pixels
                    jd.iWidthUsed = iCurW - (jd.x-pJPEG->iXOffset);
-                } else if (((jd.x-pJPEG->iXOffset) + iPitch) > pJPEG->iCropCX) { // not a full width
-                    jd.iWidthUsed = pJPEG->iCropCX - (jd.x-pJPEG->iXOffset);
+                } else if (((jd.x-pJPEG->iXOffset) + iPitch) > iCropCX) { // not a full width
+                    jd.iWidthUsed = iCropCX - (jd.x-pJPEG->iXOffset);
                 }
-                jd.y = pJPEG->iYOffset + (y * mcuCY) - pJPEG->iCropY;
+                jd.y = pJPEG->iYOffset + (y * mcuCY) - iCropY;
                 if ((jd.y - pJPEG->iYOffset + mcuCY) > iCurH) { // last row needs to be trimmed
                    jd.iHeight = iCurH - (jd.y - pJPEG->iYOffset);
                 }
@@ -5434,8 +5452,8 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows, int bCanPause)
                 bContinue = (*pJPEG->pfnDraw)(&jd);
                 iDMAOffset ^= iDMASize; // toggle ping-pong offset
                 jd.x += iPitch;
-                if (pJPEG->iCropCX != (cx * mcuCX) && (iPitch + jd.x) > (pJPEG->iCropX + pJPEG->iCropCX)) { // image is cropped, don't go past end
-                    iPitch = pJPEG->iCropCX - (jd.x-pJPEG->iXOffset); // x=0 of output is really pJPEG->iCropx
+                if (iCropCX != (cx * mcuCX) && (jd.x-pJPEG->iXOffset) + iPitch > iCropCX) { // image is cropped, don't go past end
+                    iPitch = iCropCX - (jd.x-pJPEG->iXOffset); // x=0 of output is really iCropX
                 } else if ((cx - 1 - x) < iMCUCount) // change pitch for the last set of MCUs on this row
                     iPitch = (cx - 1 - x) * mcuCX;
                 xoff = 0;
