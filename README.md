@@ -60,6 +60,21 @@ The API:
 --------
 Please consult the Wiki for detailed info about each method exposed by the JPEGDEC class.
 
+Decoding in steps:
+------------------
+decode() does the whole image in one call. On a system with a single main loop, a large image can hold that loop up for a long time. To spread the work out, call decodeBegin() with the same arguments as decode(), then call decodeRows(n) to decode up to n more rows of MCUs (8 or 16 pixel rows each, before scaling). decodeRows() returns JPEG_DECODE_MORE while rows remain, 1 when the image is finished, and 0 on an error. The draw callback is called exactly as it would be by decode(), and the input can come from memory or from the file callbacks, which are read as the decode needs more data. linux/step_test checks that both ways give the same output.
+
+```cpp
+jpeg.openRAM(data, size, draw);
+if (jpeg.decodeBegin(0, 0, 0)) {
+  int rc;
+  while ((rc = jpeg.decodeRows(2)) == JPEG_DECODE_MORE) {
+    // do other work here
+  }
+}
+jpeg.close();
+```
+
 
 If you find this code useful, please consider becoming a sponsor or sending a donation.
 
