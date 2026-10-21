@@ -1459,6 +1459,8 @@ static int JPEGFilter(uint8_t *pBuf, uint8_t *d, int iLen, uint8_t *bFF)
 
     unsigned char c, *s, *pEnd, *pStart;
     
+    if (iLen <= 0) // a read that returned nothing; a pending FF must wait for the next byte
+        return 0;
     pStart = d;
     s = pBuf;
     pEnd = &s[iLen-1]; // stop just shy of the end to not miss a final marker/stuffed 0
@@ -1483,7 +1485,8 @@ static int JPEGFilter(uint8_t *pBuf, uint8_t *d, int iLen, uint8_t *bFF)
 		else
 		{
                         int i = 16; // do these 16 bytes the slow way
-                        while (i) {
+                        // each FF takes two input bytes, so stop at the end of the input as well
+                        while (i && s < pEnd) {
                                 c = *d++ = *s++;
                                 if (c == 0xff) { // marker or stuffed zeros?
                                         if (s[0] != 0) { // it's a marker, skip both
@@ -1516,7 +1519,8 @@ static int JPEGFilter(uint8_t *pBuf, uint8_t *d, int iLen, uint8_t *bFF)
 			else
 			{
 			int i = 16; // do these 16 bytes the slow way
-			while (i) {
+			// each FF takes two input bytes, so stop at the end of the input as well
+			while (i && s < pEnd) {
 				c = *d++ = *s++;
 				if (c == 0xff) { // marker or stuffed zeros?
 					if (s[0] != 0) { // it's a marker, skip both
@@ -1564,7 +1568,8 @@ static void JPEGGetMoreData(JPEGIMAGE *pPage)
         return; // buffer is already full; no need to read more data
     if (pPage->iVLCOff != 0)
     {
-        memcpy(pPage->ucFileBuf, &pPage->ucFileBuf[pPage->iVLCOff], pPage->iVLCSize - pPage->iVLCOff);
+        // The regions overlap when less than half the buffer has been used
+        memmove(pPage->ucFileBuf, &pPage->ucFileBuf[pPage->iVLCOff], pPage->iVLCSize - pPage->iVLCOff);
         pPage->iVLCSize -= pPage->iVLCOff;
         pPage->iVLCOff = 0;
         pPage->bb.pBuf = pPage->ucFileBuf; // reset VLC source pointer too
