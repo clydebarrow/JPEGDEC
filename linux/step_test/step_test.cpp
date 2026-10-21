@@ -61,7 +61,6 @@ struct Config {
   bool framebuffer;
   int max_mcus;  // 0 leaves the default
   int abort_after;
-  bool skips_blocks;  // JPEGDEC 1.8.4 already crashes on progressive images when it skips blocks
 };
 
 struct Result {
@@ -132,23 +131,23 @@ static Result run(const std::vector<uint8_t> &file, const Config &c, int step, b
 
 int main(int argc, char **argv) {
   static const Config configs[] = {
-      {"rgb565", RGB565_LITTLE_ENDIAN, 0, false, false, 0, -1, false},
-      {"rgb565be", RGB565_BIG_ENDIAN, 0, false, false, 0, -1, false},
-      {"rgb8888", RGB8888, 0, false, false, 0, -1, false},
-      {"gray", EIGHT_BIT_GRAYSCALE, 0, false, false, 0, -1, true},
-      {"luma", RGB565_LITTLE_ENDIAN, JPEG_LUMA_ONLY, false, false, 0, -1, true},
-      {"half", RGB565_LITTLE_ENDIAN, JPEG_SCALE_HALF, false, false, 0, -1, false},
-      {"quarter", RGB565_LITTLE_ENDIAN, JPEG_SCALE_QUARTER, false, false, 0, -1, false},
-      {"eighth", RGB8888, JPEG_SCALE_EIGHTH, false, false, 0, -1, false},
-      {"crop", RGB565_LITTLE_ENDIAN, 0, true, false, 0, -1, true},
-      {"dma", RGB565_LITTLE_ENDIAN, JPEG_USES_DMA, false, false, 0, -1, false},
-      {"max1", RGB565_LITTLE_ENDIAN, 0, false, false, 1, -1, false},
-      {"framebuffer", RGB565_LITTLE_ENDIAN, 0, false, true, 0, -1, false},
-      {"framebuffer8888", RGB8888, 0, false, true, 0, -1, false},
-      {"abort", RGB565_LITTLE_ENDIAN, 0, false, false, 0, 3, false},
+      {"rgb565", RGB565_LITTLE_ENDIAN, 0, false, false, 0, -1},
+      {"rgb565be", RGB565_BIG_ENDIAN, 0, false, false, 0, -1},
+      {"rgb8888", RGB8888, 0, false, false, 0, -1},
+      {"gray", EIGHT_BIT_GRAYSCALE, 0, false, false, 0, -1},
+      {"luma", RGB565_LITTLE_ENDIAN, JPEG_LUMA_ONLY, false, false, 0, -1},
+      {"half", RGB565_LITTLE_ENDIAN, JPEG_SCALE_HALF, false, false, 0, -1},
+      {"quarter", RGB565_LITTLE_ENDIAN, JPEG_SCALE_QUARTER, false, false, 0, -1},
+      {"eighth", RGB8888, JPEG_SCALE_EIGHTH, false, false, 0, -1},
+      {"crop", RGB565_LITTLE_ENDIAN, 0, true, false, 0, -1},
+      {"dma", RGB565_LITTLE_ENDIAN, JPEG_USES_DMA, false, false, 0, -1},
+      {"max1", RGB565_LITTLE_ENDIAN, 0, false, false, 1, -1},
+      {"framebuffer", RGB565_LITTLE_ENDIAN, 0, false, true, 0, -1},
+      {"framebuffer8888", RGB8888, 0, false, true, 0, -1},
+      {"abort", RGB565_LITTLE_ENDIAN, 0, false, false, 0, 3},
   };
   static const int steps[] = {1, 2, 3, 1000};
-  int failures = 0, checks = 0, skipped = 0;
+  int failures = 0, checks = 0;
   for (int a = 1; a < argc; a++) {
     FILE *f = fopen(argv[a], "rb");
     if (f == nullptr) {
@@ -165,10 +164,6 @@ int main(int argc, char **argv) {
     const bool progressive = probe.getJPEGType() == JPEG_MODE_PROGRESSIVE;
     probe.close();
     for (const Config &c : configs) {
-      if (progressive && c.skips_blocks) {
-        skipped++;
-        continue;
-      }
       const Result ref = run(file, c, 0, false);
       if (ref.status != 1) {
         printf("FAIL %s %s: reference decode status %d error %d calls %d\n", argv[a], c.name, ref.status,
@@ -235,6 +230,6 @@ int main(int argc, char **argv) {
       failures++;
     }
   }
-  printf("%d checks, %d failures, %d progressive combinations skipped\n", checks, failures, skipped);
+  printf("%d checks, %d failures\n", checks, failures);
   return failures != 0;
 }
