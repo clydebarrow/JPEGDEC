@@ -259,7 +259,7 @@ int JPEGDEC::decodeBegin(int x, int y, int iOptions)
 
 int JPEGDEC::decodeRows(int iRows)
 {
-    return JPEGDecodeRows(&_jpeg, iRows);
+    return JPEGDecodeRows(&_jpeg, iRows, 1);
 } /* decodeRows() */
 //
 // set draw callback user pointer variable

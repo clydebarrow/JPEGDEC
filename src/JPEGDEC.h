@@ -71,6 +71,10 @@
 #define JPEG_SCALE_EIGHTH 8
 // decodeRows() return value when MCU rows remain to be decoded
 #define JPEG_DECODE_MORE 2
+// decodeRows() return value when it stopped to wait for the read callback to have more input
+#define JPEG_DECODE_NEED_DATA 3
+// decodeRows() only decodes an MCU with at least this much input buffered, or all of the file read
+#define JPEG_INPUT_MARGIN (JPEG_FILE_BUF_SIZE - FILE_HIGHWATER)
 #define JPEG_LE_PIXELS 16
 #define JPEG_EXIF_THUMBNAIL 32
 #define JPEG_LUMA_ONLY 64
@@ -220,6 +224,8 @@ typedef struct jpeg_image_tag
     int iResInterval, iResCount; // restart interval
     int iMaxMCUs; // max MCUs of pixels per JPEGDraw call
     int iDecodeRow; // next MCU row for decodeRows()
+    int iDecodeCol; // next MCU column when decodeRows() paused part way through a row, otherwise 0
+    int iDecodeXOff, iDecodePitch, iDecodeDrawX; // output group state of a paused row
     int iDCPred0, iDCPred1, iDCPred2; // DC predictors carried between decodeRows() calls
     int iDMAOffset; // ping-pong buffer offset carried between decodeRows() calls
     uint16_t *pAlignedPixels; // usPixels as it was when the decode started

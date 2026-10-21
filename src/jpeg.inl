@@ -65,7 +65,7 @@ static int JPEGParseInfo(JPEGIMAGE *pPage, int bExtractThumb);
 static void JPEGGetMoreData(JPEGIMAGE *pPage);
 static int DecodeJPEG(JPEGIMAGE *pImage);
 static int JPEGDecodeStart(JPEGIMAGE *pJPEG);
-static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows);
+static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows, int bCanPause);
 static int32_t readRAM(JPEGFILE *pFile, uint8_t *pBuf, int32_t iLen);
 static int32_t seekMem(JPEGFILE *pFile, int32_t iPosition);
 #if defined (__MACH__) || defined( __LINUX__ ) || defined( __MCUXPRESSO ) || defined(_WIN64)
@@ -672,7 +672,7 @@ int JPEG_decodeBegin(JPEGIMAGE *pJPEG, int x, int y, int iOptions)
 
 int JPEG_decodeRows(JPEGIMAGE *pJPEG, int iRows)
 {
-    return JPEGDecodeRows(pJPEG, iRows);
+    return JPEGDecodeRows(pJPEG, iRows, 1);
 } /* JPEG_decodeRows() */
 
 int JPEG_decodeDither(JPEGIMAGE *pJPEG, uint8_t *pDither, int iOptions)
@@ -4969,7 +4969,7 @@ static int DecodeJPEG(JPEGIMAGE *pJPEG)
 {
     if (!JPEGDecodeStart(pJPEG))
         return 0;
-    return JPEGDecodeRows(pJPEG, 0x7fffffff);
+    return JPEGDecodeRows(pJPEG, 0x7fffffff, 0);
 } /* DecodeJPEG() */
 //
 // Prepare to decode the image a few MCU rows at a time with JPEGDecodeRows().
@@ -5003,6 +5003,7 @@ static int JPEGDecodeStart(JPEGIMAGE *pJPEG)
     pJPEG->iResCount = pJPEG->iResInterval;
     // State carried from one JPEGDecodeRows() call to the next
     pJPEG->iDecodeRow = 0;
+    pJPEG->iDecodeCol = 0;
     pJPEG->iDCPred0 = pJPEG->iDCPred1 = pJPEG->iDCPred2 = 0;
     pJPEG->iDMAOffset = 0;
     pJPEG->pAlignedPixels = pJPEG->usPixels;
@@ -5013,10 +5014,13 @@ static int JPEGDecodeStart(JPEGIMAGE *pJPEG)
 // Decode up to iRows more rows of MCUs, continuing where the last call stopped.
 // Returns JPEG_DECODE_MORE when rows remain, 1 when the image is finished (or
 // the draw callback asked to stop) and 0 on error.
+// With bCanPause, it also stops before an MCU when less than JPEG_INPUT_MARGIN
+// bytes of input are buffered and the read callback has no more yet, and
+// returns JPEG_DECODE_NEED_DATA; the next call resumes at that MCU.
 //
-static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows)
+static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows, int bCanPause)
 {
-    int cx, cy, x, y, yEnd, mcuCX, mcuCY;
+    int cx, cy, x, y, yEnd, mcuCX, mcuCY, iStartCol, bPaused = 0;
     int iLum0, iLum1, iLum2, iLum3, iCr, iCb;
     signed int iDCPred0, iDCPred1, iDCPred2;
     int i, iQuant1, iQuant2, iQuant3, iErr;
@@ -5166,6 +5170,7 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows)
     jd.iHeight = mcuCY;
     y = pJPEG->iDecodeRow;
     yEnd = (iRows < cy - y) ? y + iRows : cy;
+    iStartCol = pJPEG->iDecodeCol; // non-zero when resuming part way through a row
     for (; y < yEnd && bContinue && iErr == 0; y++)
     {
         bSkipRow = (y*mcuCY < pJPEG->iCropY);
@@ -5185,8 +5190,25 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows)
         } else { // use our internal buffer to do it a block at a time
             iPitch = iMCUCount * mcuCX; // pixels per line of LCD buffer
         }
-        for (x = 0; x < cx && bContinue && iErr == 0; x++)
+        if (iStartCol) { // carry on with the output group of the paused MCU
+            xoff = pJPEG->iDecodeXOff;
+            iPitch = pJPEG->iDecodePitch;
+            jd.x = pJPEG->iDecodeDrawX;
+        }
+        for (x = iStartCol, iStartCol = 0; x < cx && bContinue && iErr == 0; x++)
         {
+            // Wait for input rather than decode past the end of what has arrived
+            if (bCanPause && pJPEG->JPEGFile.iPos < pJPEG->JPEGFile.iSize &&
+                pJPEG->iVLCSize - pJPEG->iVLCOff < JPEG_INPUT_MARGIN)
+            {
+                JPEGGetMoreData(pJPEG);
+                if (pJPEG->JPEGFile.iPos < pJPEG->JPEGFile.iSize &&
+                    pJPEG->iVLCSize - pJPEG->iVLCOff < JPEG_INPUT_MARGIN)
+                {
+                    bPaused = 1;
+                    break;
+                }
+            }
             if (pJPEG->pFramebuffer == NULL) {
                 pJPEG->usPixels = &pAlignedPixels[iDMAOffset]; // make sure output is correct offset for DMA   
             }
@@ -5410,8 +5432,14 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows)
             if (pJPEG->iVLCOff >= FILE_HIGHWATER)
                 JPEGGetMoreData(pJPEG); // need more 'filtered' VLC data
         } // for x
+        if (bPaused)
+            break;
     } // for y
     pJPEG->iDecodeRow = y;
+    pJPEG->iDecodeCol = bPaused ? x : 0;
+    pJPEG->iDecodeXOff = xoff;
+    pJPEG->iDecodePitch = iPitch;
+    pJPEG->iDecodeDrawX = jd.x;
     pJPEG->iDCPred0 = iDCPred0;
     pJPEG->iDCPred1 = iDCPred1;
     pJPEG->iDCPred2 = iDCPred2;
@@ -5422,6 +5450,8 @@ static int JPEGDecodeRows(JPEGIMAGE *pJPEG, int iRows)
         pJPEG->bDecodeActive = 0;
         return 0;
     }
+    if (bPaused)
+        return JPEG_DECODE_NEED_DATA;
     if (y < cy && bContinue)
         return JPEG_DECODE_MORE;
     pJPEG->bDecodeActive = 0;

@@ -28,19 +28,25 @@ static int draw_cb(JPEGDRAW *d) {
   return ++r->calls == r->abort_after ? 0 : 1;
 }
 
+// A file in memory that may only have part of its bytes delivered so far, like a slow download
 struct MemFile {
   const std::vector<uint8_t> *data;
+  int32_t delivered;
+  bool past_delivered{false};  // a read or seek wanted bytes that had not been delivered
 };
 
 static int32_t read_cb(JPEGFILE *f, uint8_t *buf, int32_t len) {
   auto *m = static_cast<MemFile *>(f->fHandle);
-  const int32_t n = std::min<int32_t>(len, static_cast<int32_t>(m->data->size()) - f->iPos);
+  const int32_t n = std::max<int32_t>(0, std::min<int32_t>(len, m->delivered - f->iPos));
   memcpy(buf, m->data->data() + f->iPos, n);
   f->iPos += n;
   return n;
 }
 
 static int32_t seek_cb(JPEGFILE *f, int32_t pos) {
+  auto *m = static_cast<MemFile *>(f->fHandle);
+  if (pos > m->delivered)
+    m->past_delivered = true;
   f->iPos = pos;
   return pos;
 }
@@ -61,16 +67,23 @@ struct Config {
 struct Result {
   int status{0};
   int more_count{0};
+  int need_data_count{0};
+  bool past_delivered{false};
   int error{0};
   Record record;
   std::vector<uint8_t> framebuffer;
 };
 
-// step 0 means a single decode()
-static Result run(const std::vector<uint8_t> &file, const Config &c, int step, bool stream) {
+// The first bytes delivered before open(), enough for every test file's headers
+static constexpr int32_t FIRST_DELIVERY = 8192;
+
+// step 0 means a single decode(). trickle, when not 0, delivers the file through the callbacks this many bytes
+// at a time between decodeRows() calls, after a first delivery of FIRST_DELIVERY bytes.
+static Result run(const std::vector<uint8_t> &file, const Config &c, int step, bool stream, int trickle = 0) {
   static JPEGDEC jpeg;  // large; keep it off the stack
   Result res;
-  MemFile mem{&file};
+  const int32_t size = static_cast<int32_t>(file.size());
+  MemFile mem{&file, trickle ? std::min(size, FIRST_DELIVERY) : size};
   int ok = stream ? jpeg.open(&mem, static_cast<int>(file.size()), close_cb, read_cb, seek_cb, draw_cb)
                   : jpeg.openRAM(const_cast<uint8_t *>(file.data()), static_cast<int>(file.size()), draw_cb);
   if (!ok) {
@@ -96,9 +109,22 @@ static Result run(const std::vector<uint8_t> &file, const Config &c, int step, b
   } else if (!jpeg.decodeBegin(0, 0, c.options)) {
     res.status = 0;
   } else {
-    while ((res.status = jpeg.decodeRows(step)) == JPEG_DECODE_MORE)
-      res.more_count++;
+    for (;;) {
+      res.status = jpeg.decodeRows(step);
+      if (res.status == JPEG_DECODE_NEED_DATA) {
+        res.need_data_count++;
+        if (mem.delivered == size)
+          break;  // waiting for bytes that will never come
+      } else if (res.status == JPEG_DECODE_MORE) {
+        res.more_count++;
+      } else {
+        break;
+      }
+      if (trickle)
+        mem.delivered = std::min(size, mem.delivered + trickle);
+    }
   }
+  res.past_delivered = mem.past_delivered;
   res.error = jpeg.getLastError();
   jpeg.close();
   return res;
@@ -163,11 +189,39 @@ int main(int argc, char **argv) {
             why = "pixels";
           else if (got.framebuffer != ref.framebuffer)
             why = "framebuffer";
+          else if (got.need_data_count != 0)
+            why = "a pause with all the input there";
           if (why != nullptr) {
             printf("FAIL %s %s step %d%s: %s differs (status %d/%d, calls %d/%d)\n", argv[a], c.name, step,
                    stream ? " stream" : "", why, got.status, ref.status, got.record.calls, ref.record.calls);
             failures++;
           }
+        }
+      }
+      // A slow link: the output must not change, and a file longer than the first delivery must pause
+      for (int trickle : {1, 61, 700}) {
+        if (trickle == 1 && file.size() > 65536)
+          continue;  // a byte at a time is slow for the large sample photos
+        checks++;
+        const Result got = run(file, c, 1, true, trickle);
+        const char *why = nullptr;
+        if (got.status != ref.status)
+          why = "status";
+        else if (got.record.geometry != ref.record.geometry)
+          why = "callback geometry";
+        else if (got.record.pixels != ref.record.pixels)
+          why = "pixels";
+        else if (got.framebuffer != ref.framebuffer)
+          why = "framebuffer";
+        else if (got.past_delivered)
+          why = "a seek past the delivered bytes";
+        else if (trickle == 1 && file.size() > static_cast<size_t>(FIRST_DELIVERY) + JPEG_FILE_BUF_SIZE &&
+                 c.abort_after < 0 && !c.crop && !progressive && got.need_data_count == 0)
+          why = "no pause for data";  // a byte per row cannot keep up; a progressive image only reads its first scan
+        if (why != nullptr) {
+          printf("FAIL %s %s trickle %d: %s differs (status %d/%d, calls %d/%d, pauses %d)\n", argv[a], c.name,
+                 trickle, why, got.status, ref.status, got.record.calls, ref.record.calls, got.need_data_count);
+          failures++;
         }
       }
     }
