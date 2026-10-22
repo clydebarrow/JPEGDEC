@@ -4,7 +4,7 @@
 // Copyright (c) 2024 BitBank Software, Inc.
 // Project started Jan 21, 2024
 //
-#if defined (ARDUINO_ARCH_ESP32) && !defined(NO_SIMD)
+#if (defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM)) && !defined(NO_SIMD)
 #if __has_include ("dsps_fft2r_platform.h")
 #include "dsps_fft2r_platform.h"
 #if (dsps_fft2r_sc16_aes3_enabled == 1)
